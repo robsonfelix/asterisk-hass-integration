@@ -18,7 +18,10 @@ class AsteriskDeviceEntity:
     @property
     def _debug_logging(self) -> bool:
         """Return True if debug logging is enabled."""
-        return self._entry.options.get(CONF_DEBUG_LOGGING, False)
+        try:
+            return self._entry.options.get(CONF_DEBUG_LOGGING, False)
+        except Exception:
+            return False
 
     @property
     def device_info(self):
