@@ -44,6 +44,12 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
     def handle_event(self, event: Event, **kwargs):
         """Handle an endpoint update event."""
         state = event["State"]
+        _LOGGER.debug(
+            "DeviceStateChange event for %s: State=%s, Device=%s",
+            self._device["extension"],
+            state,
+            event.get("Device"),
+        )
         self._state = STATES.get(state, STATES["UNKNOWN"])
         self.schedule_update_ha_state()
 
@@ -84,13 +90,31 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
             CallerIDNum=device["extension"],
         )
         self._ami_client.add_event_listener(
+            self.handle_hangup,
+            white_list=["Hangup"],
+            ConnectedLineNum=device["extension"],
+        )
+        self._ami_client.add_event_listener(
             self.handle_new_channel,
             white_list=["Newchannel"],
             CallerIDNum=device["extension"],
         )
+        self._ami_client.add_event_listener(
+            self.handle_new_channel,
+            white_list=["Newchannel"],
+            ConnectedLineNum=device["extension"],
+        )
 
     def handle_new_connected_line(self, event: Event, **kwargs):
         """Handle an NewConnectedLine event."""
+        _LOGGER.debug(
+            "NewConnectedLine event for %s: CallerIDNum=%s, ConnectedLineNum=%s, ChannelStateDesc=%s, Channel=%s",
+            self._device["extension"],
+            event.get("CallerIDNum"),
+            event.get("ConnectedLineNum"),
+            event.get("ChannelStateDesc"),
+            event.get("Channel"),
+        )
         if event["ConnectedLineNum"] != self._device["extension"]:
             self._state = event["ConnectedLineNum"]
         else:
@@ -110,6 +134,15 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
 
     def handle_hangup(self, event: Event, **kwargs):
         """Handle an Hangup event."""
+        _LOGGER.debug(
+            "Hangup event for %s: CallerIDNum=%s, ConnectedLineNum=%s, ChannelStateDesc=%s, Cause=%s, Channel=%s",
+            self._device["extension"],
+            event.get("CallerIDNum"),
+            event.get("ConnectedLineNum"),
+            event.get("ChannelStateDesc"),
+            event.get("Cause"),
+            event.get("Channel"),
+        )
         if event["Cause"] != "26":
             self._state = "None"
             self._extra_attributes = {
@@ -129,6 +162,15 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
 
     def handle_new_channel(self, event: Event, **kwargs):
         """Handle an NewChannel event."""
+        _LOGGER.debug(
+            "Newchannel event for %s: CallerIDNum=%s, ConnectedLineNum=%s, ChannelStateDesc=%s, Channel=%s, Exten=%s",
+            self._device["extension"],
+            event.get("CallerIDNum"),
+            event.get("ConnectedLineNum"),
+            event.get("ChannelStateDesc"),
+            event.get("Channel"),
+            event.get("Exten"),
+        )
         self._state = "None"
         self._extra_attributes = {
             "Channel": event["Channel"],
