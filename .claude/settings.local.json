@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git remote add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix missing event listeners for ConnectedLineSensor\n\n- Add ConnectedLineNum filter for Hangup events to catch incoming call hangups\n- Add ConnectedLineNum filter for Newchannel events to catch incoming call channels\n- Add debug logging to all event handlers for troubleshooting\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git remote:*)",
+      "Bash(git remote set-url:*)"
+    ]
+  }
+}
