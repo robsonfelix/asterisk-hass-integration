@@ -7,7 +7,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNA
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
 import voluptuous as vol
 
-from .const import DOMAIN
+from .const import CONF_DEBUG_LOGGING, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,6 +18,11 @@ class AsteriskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_POLL
     reauth_entry: ConfigEntry | None = None
+
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry):
+        """Get the options flow for this handler."""
+        return AsteriskOptionsFlowHandler(config_entry)
 
     async def _show_form(self, errors: dict[str, str] | None = None) -> FlowResult:
         """Show the form to the user."""
@@ -131,3 +136,28 @@ class AsteriskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.hass.config_entries.async_update_entry(self.reauth_entry, data=user_input)
         await self.hass.config_entries.async_reload(self.reauth_entry.entry_id)
         return self.async_abort(reason="reauth_successful")
+
+
+class AsteriskOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for Asterisk."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input=None) -> FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_DEBUG_LOGGING,
+                        default=self.config_entry.options.get(CONF_DEBUG_LOGGING, False),
+                    ): bool,
+                }
+            ),
+        )

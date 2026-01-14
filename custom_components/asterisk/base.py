@@ -1,6 +1,6 @@
 from asterisk.ami import AMIClient
 
-from .const import CLIENT, DOMAIN
+from .const import CLIENT, CONF_DEBUG_LOGGING, DOMAIN
 
 
 class AsteriskDeviceEntity:
@@ -14,6 +14,11 @@ class AsteriskDeviceEntity:
         self._ami_client: AMIClient = hass.data[DOMAIN][entry.entry_id][CLIENT]
         self._name: str
         self._unique_id: str
+
+    @property
+    def _debug_logging(self) -> bool:
+        """Return True if debug logging is enabled."""
+        return self._entry.options.get(CONF_DEBUG_LOGGING, False)
 
     @property
     def device_info(self):

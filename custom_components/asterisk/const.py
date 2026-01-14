@@ -1,6 +1,7 @@
 DOMAIN = "asterisk"
 CLIENT = "client"
 AUTO_RECONNECT = "auto_reconnect"
+CONF_DEBUG_LOGGING = "debug_logging"
 PLATFORMS = [
     "binary_sensor",
     "sensor",

@@ -30,5 +30,15 @@
                 }
             }
         }
-   }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Asterisk Options",
+                "data": {
+                    "debug_logging": "Enable debug logging"
+                }
+            }
+        }
+    }
 }
