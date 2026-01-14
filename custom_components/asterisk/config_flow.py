@@ -22,7 +22,7 @@ class AsteriskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry):
         """Get the options flow for this handler."""
-        return AsteriskOptionsFlowHandler(config_entry)
+        return AsteriskOptionsFlowHandler()
 
     async def _show_form(self, errors: dict[str, str] | None = None) -> FlowResult:
         """Show the form to the user."""
@@ -140,10 +140,6 @@ class AsteriskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class AsteriskOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Asterisk."""
-
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None) -> FlowResult:
         """Manage the options."""
