@@ -18,8 +18,14 @@ from .const import AUTO_RECONNECT, CLIENT, DOMAIN, PLATFORMS, SIP_LOADED, PJSIP_
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update - reload the integration."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Setup up a config entry."""
+    _LOGGER.info("Setting up Asterisk integration for %s", entry.data.get(CONF_HOST))
 
     def create_PJSIP_device(event: Event, **kwargs):
         _LOGGER.debug("Creating PJSIP device: %s", event)
@@ -112,6 +118,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
        _LOGGER.debug("PJSIP module not loaded. Skipping PJSIP devices.")
        hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
 
+    # Listen for options updates to reload the integration
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
+
+    _LOGGER.info("Asterisk integration setup complete")
     return True
 
 

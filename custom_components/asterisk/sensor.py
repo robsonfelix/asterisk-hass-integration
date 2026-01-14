@@ -34,7 +34,15 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
         super().__init__(hass, entry, device)
         self._unique_id = f"{self._unique_id_prefix}_state"
         self._name = f"{device['extension']} State"
-        self._state = device["status"]
+        # Map initial state through STATES for consistency
+        initial_status = device["status"]
+        self._state = STATES.get(initial_status, STATES.get(initial_status.upper(), STATES["UNKNOWN"]))
+        _LOGGER.info(
+            "DeviceStateSensor initialized for %s: initial_status=%s, mapped_state=%s",
+            device["extension"],
+            initial_status,
+            self._state,
+        )
         self._ami_client.add_event_listener(
             self.handle_event,
             white_list=["DeviceStateChange"],
@@ -44,6 +52,13 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
     def handle_event(self, event: Event, **kwargs):
         """Handle an endpoint update event."""
         state = event["State"]
+        new_state = STATES.get(state, STATES["UNKNOWN"])
+        _LOGGER.info(
+            "DeviceStateChange for %s: raw=%s, mapped=%s",
+            self._device["extension"],
+            state,
+            new_state,
+        )
         if self._debug_logging:
             _LOGGER.warning(
                 "DeviceStateChange event for %s: State=%s, Device=%s",
@@ -51,7 +66,7 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
                 state,
                 event.get("Device"),
             )
-        self._state = STATES.get(state, STATES["UNKNOWN"])
+        self._state = new_state
         self.schedule_update_ha_state()
 
     @property
