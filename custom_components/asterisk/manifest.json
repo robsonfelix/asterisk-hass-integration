@@ -8,11 +8,11 @@
     "dependencies": [],
     "documentation": "https://github.com/robsonfelix/asterisk-hass-integration",
     "homekit": {},
-    "iot_class": "local_polling",
+    "iot_class": "local_push",
     "issue_tracker": "https://github.com/robsonfelix/asterisk-hass-integration/issues",
     "loggers": ["custom_components.asterisk"],
-    "requirements": ["asterisk-ami>=0.1.7"],
+    "requirements": [],
     "ssdp": [],
-    "version": "1.0.9",
+    "version": "1.1.0",
     "zeroconf": []
 }
