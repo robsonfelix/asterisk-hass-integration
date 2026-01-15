@@ -17,6 +17,9 @@ from .const import AUTO_RECONNECT, CLIENT, DOMAIN, PLATFORMS, SIP_LOADED, PJSIP_
 
 _LOGGER = logging.getLogger(__name__)
 
+# Timeout for device discovery (seconds)
+DISCOVERY_TIMEOUT = 10
+
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update - reload the integration."""
@@ -27,6 +30,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Setup up a config entry."""
     _LOGGER.warning("Setting up Asterisk integration for %s", entry.data.get(CONF_HOST))
 
+    # Events to signal discovery completion
+    sip_complete = asyncio.Event()
+    pjsip_complete = asyncio.Event()
+    devices = []
+
     def create_PJSIP_device(event: AMIEvent):
         _LOGGER.debug("Creating PJSIP device: %s", event)
         device = {
@@ -34,7 +42,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "tech": "PJSIP",
             "status": event["DeviceState"],
         }
-        hass.data[DOMAIN][entry.entry_id][CONF_DEVICES].append(device)
+        devices.append(device)
 
     def create_SIP_device(event: AMIEvent):
         _LOGGER.debug("Creating SIP device: %s", event)
@@ -43,26 +51,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "tech": "SIP",
             "status": event["Status"],
         }
-        hass.data[DOMAIN][entry.entry_id][CONF_DEVICES].append(device)
+        devices.append(device)
 
-    def devices_complete(event: AMIEvent):
-        sip_loaded = hass.data[DOMAIN][entry.entry_id][SIP_LOADED]
-        pjsip_loaded = hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED]
-        if event.name == "PeerlistComplete":
-            _LOGGER.debug("SIP loaded.")
-            sip_loaded = True
-            hass.data[DOMAIN][entry.entry_id][SIP_LOADED] = True
-        elif event.name == "EndpointListComplete":
-            _LOGGER.debug("PJSIP loaded.")
-            pjsip_loaded = True
-            hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
+    def on_sip_complete(event: AMIEvent):
+        _LOGGER.debug("SIP discovery complete")
+        hass.loop.call_soon_threadsafe(sip_complete.set)
 
-        if sip_loaded and pjsip_loaded:
-            _LOGGER.debug("Both SIP and PJSIP loaded. Loading platforms.")
-            asyncio.run_coroutine_threadsafe(
-                hass.config_entries.async_forward_entry_setups(entry, PLATFORMS),
-                hass.loop
-            )
+    def on_pjsip_complete(event: AMIEvent):
+        _LOGGER.debug("PJSIP discovery complete")
+        hass.loop.call_soon_threadsafe(pjsip_complete.set)
 
     async def send_action_service(call) -> None:
         """Send action service."""
@@ -91,35 +88,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         raise ConfigEntryNotReady(e)
 
+    # Register event listeners BEFORE sending actions
+    client.add_event_listener(create_SIP_device, white_list=["PeerEntry"])
+    client.add_event_listener(on_sip_complete, white_list=["PeerlistComplete"])
+    client.add_event_listener(create_PJSIP_device, white_list=["EndpointList"])
+    client.add_event_listener(on_pjsip_complete, white_list=["EndpointListComplete"])
+
+    # Small delay to ensure listeners are ready in reader thread
+    await asyncio.sleep(0.1)
+
+    # Send discovery actions
+    sip_response = client.send_action("SIPpeers")
+    if "Error" in sip_response:
+        _LOGGER.debug("SIP module not loaded. Skipping SIP devices.")
+        sip_complete.set()
+
+    pjsip_response = client.send_action("PJSIPShowEndpoints")
+    if "Error" in pjsip_response:
+        _LOGGER.debug("PJSIP module not loaded. Skipping PJSIP devices.")
+        pjsip_complete.set()
+
+    # Wait for both discoveries to complete with timeout
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(sip_complete.wait(), pjsip_complete.wait()),
+            timeout=DISCOVERY_TIMEOUT
+        )
+        _LOGGER.debug("Device discovery complete. Found %d devices.", len(devices))
+    except asyncio.TimeoutError:
+        _LOGGER.warning("Device discovery timed out after %ds. Found %d devices.",
+                       DISCOVERY_TIMEOUT, len(devices))
+
+    # Store data
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         CLIENT: client,
         AUTO_RECONNECT: None,  # Our client handles reconnection internally
-        CONF_DEVICES: [],
-        SIP_LOADED: False,
-        PJSIP_LOADED: False,
+        CONF_DEVICES: devices,
+        SIP_LOADED: True,
+        PJSIP_LOADED: True,
     }
+
+    # Register service
     hass.services.async_register(DOMAIN, "send_action", send_action_service)
 
-    # Register event listeners for SIP devices
-    client.add_event_listener(create_SIP_device, white_list=["PeerEntry"])
-    client.add_event_listener(devices_complete, white_list=["PeerlistComplete"])
-    response = client.send_action("SIPpeers")
-    if "Error" in response:
-        _LOGGER.debug("SIP module not loaded. Skipping SIP devices.")
-        hass.data[DOMAIN][entry.entry_id][SIP_LOADED] = True
-
-    # Register event listeners for PJSIP devices
-    client.add_event_listener(create_PJSIP_device, white_list=["EndpointList"])
-    client.add_event_listener(devices_complete, white_list=["EndpointListComplete"])
-    response = client.send_action("PJSIPShowEndpoints")
-    if "Error" in response:
-        _LOGGER.debug("PJSIP module not loaded. Skipping PJSIP devices.")
-        hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
+    # Now load platforms - this happens synchronously in the async context
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Listen for options updates to reload the integration
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
-    _LOGGER.warning("Asterisk integration setup complete")
+    _LOGGER.warning("Asterisk integration setup complete with %d devices", len(devices))
     return True
 
 

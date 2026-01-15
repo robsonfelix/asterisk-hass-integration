@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-01-15
+
+### Fixed
+- Fixed startup race condition where sensors showed "unavailable" after HA restart
+- Fixed state updates not reflecting in Home Assistant (thread-safe scheduling)
+
 ## [1.1.0] - 2026-01-15
 
 ### Changed
