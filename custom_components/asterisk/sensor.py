@@ -1,14 +1,28 @@
 import logging
 
-from asterisk.ami import Event
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_DEVICES
 from homeassistant.util.dt import now
 
+from .ami_client import AMIEvent
 from .base import AsteriskDeviceEntity
 from .const import CONF_DEBUG_LOGGING, DOMAIN, STATE_ICONS, STATES
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def map_state(raw_state: str) -> str:
+    """Map a raw state string to a friendly state name.
+
+    Handles both uppercase codes (NOT_INUSE) and friendly names (Not in use).
+    """
+    if raw_state in STATES:
+        return STATES[raw_state]
+    if raw_state.upper() in STATES:
+        return STATES[raw_state.upper()]
+    if raw_state in STATES.values():
+        return raw_state
+    return STATES["UNKNOWN"]
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -35,43 +49,97 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
         self._unique_id = f"{self._unique_id_prefix}_state"
         self._name = f"{device['extension']} State"
         # Map initial state through STATES for consistency
+        # PJSIP returns friendly names like "Not in use", SIP returns codes like "NOT_INUSE"
         initial_status = device["status"]
-        self._state = STATES.get(initial_status, STATES.get(initial_status.upper(), STATES["UNKNOWN"]))
-        _LOGGER.info(
-            "DeviceStateSensor initialized for %s: initial_status=%s, mapped_state=%s",
+        self._state = map_state(initial_status)
+        self._device_filter = f"{device['tech']}/{device['extension']}"
+        _LOGGER.warning(
+            "DeviceStateSensor initialized for %s: filter=%s, initial=%s",
             device["extension"],
-            initial_status,
+            self._device_filter,
             self._state,
         )
+        # Listen to ALL DeviceStateChange events and filter in handler
         self._ami_client.add_event_listener(
             self.handle_event,
             white_list=["DeviceStateChange"],
-            Device=f"{device['tech']}/{device['extension']}",
         )
 
-    def handle_event(self, event: Event, **kwargs):
+    def handle_event(self, event: AMIEvent):
         """Handle an endpoint update event."""
-        state = event["State"]
-        new_state = STATES.get(state, STATES["UNKNOWN"])
+        device = event.get("Device", "")
+        state = event.get("State", "")
+
+        # Only process events for our device
+        if device != self._device_filter:
+            return
+
+        _LOGGER.warning("ASTERISK: %s -> %s", device, state)
+        self._state = STATES.get(state, STATES["UNKNOWN"])
+        self.schedule_update_ha_state()
+
+    def handle_newstate(self, event: AMIEvent):
+        """Handle a Newstate event to detect ringing at channel level."""
+        channel_state_desc = event.get("ChannelStateDesc", "")
+        exten = event.get("Exten", "")
+        caller_id_num = event.get("CallerIDNum", "")
+        connected_line_num = event.get("ConnectedLineNum", "")
+
         _LOGGER.info(
-            "DeviceStateChange for %s: raw=%s, mapped=%s",
+            "Newstate for %s: ChannelStateDesc=%s, CallerIDNum=%s, ConnectedLineNum=%s, Exten=%s",
             self._device["extension"],
-            state,
-            new_state,
+            channel_state_desc,
+            caller_id_num,
+            connected_line_num,
+            exten,
         )
         if self._debug_logging:
             _LOGGER.warning(
-                "DeviceStateChange event for %s: State=%s, Device=%s",
+                "Newstate event for %s: ChannelStateDesc=%s, Channel=%s, CallerIDNum=%s, ConnectedLineNum=%s, Exten=%s",
                 self._device["extension"],
-                state,
-                event.get("Device"),
+                channel_state_desc,
+                event.get("Channel"),
+                caller_id_num,
+                connected_line_num,
+                exten,
             )
-        self._state = new_state
-        self.schedule_update_ha_state()
+        # Check if this is a ringing state
+        if channel_state_desc in ("Ringing", "Ring"):
+            # Set to Ringing if this extension is being called (via Exten, ConnectedLineNum, or caller)
+            ext = self._device["extension"]
+            if exten == ext or connected_line_num == ext or caller_id_num == ext:
+                self._state = STATES["RINGING"]
+                self._schedule_update()  # Non-blocking: queue to HA event loop
+
+    def handle_dial(self, event: AMIEvent):
+        """Handle DialBegin/DialState events to detect ringing."""
+        dial_status = event.get("DialStatus", "")
+        dest_caller_id = event.get("DestCallerIDNum", "")
+
+        _LOGGER.info(
+            "Dial event for %s: DialStatus=%s, DestCallerIDNum=%s",
+            self._device["extension"],
+            dial_status,
+            dest_caller_id,
+        )
+        if self._debug_logging:
+            _LOGGER.warning(
+                "Dial event for %s: Event=%s, DialStatus=%s, DestCallerIDNum=%s, DestChannel=%s",
+                self._device["extension"],
+                event.name,
+                dial_status,
+                dest_caller_id,
+                event.get("DestChannel"),
+            )
+        # DialBegin means the device is starting to ring
+        if event.name == "DialBegin" or dial_status == "RINGING":
+            if dest_caller_id == self._device["extension"]:
+                self._state = STATES["RINGING"]
+                self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
-    def state(self) -> str:
-        """Return registered state."""
+    def native_value(self) -> str:
+        """Return the sensor value."""
         return self._state
 
     @property
@@ -121,7 +189,7 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
             ConnectedLineNum=device["extension"],
         )
 
-    def handle_new_connected_line(self, event: Event, **kwargs):
+    def handle_new_connected_line(self, event: AMIEvent):
         """Handle an NewConnectedLine event."""
         if self._debug_logging:
             _LOGGER.warning(
@@ -147,9 +215,9 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
             "Exten": event["Exten"],
             "Context": event["Context"],
         }
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
-    def handle_hangup(self, event: Event, **kwargs):
+    def handle_hangup(self, event: AMIEvent):
         """Handle an Hangup event."""
         if self._debug_logging:
             _LOGGER.warning(
@@ -176,9 +244,9 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
                 "Cause": event["Cause"],
                 "Cause-txt": event["Cause-txt"],
             }
-            self.schedule_update_ha_state()
+            self._schedule_update()  # Non-blocking: queue to HA event loop
 
-    def handle_new_channel(self, event: Event, **kwargs):
+    def handle_new_channel(self, event: AMIEvent):
         """Handle an NewChannel event."""
         if self._debug_logging:
             _LOGGER.warning(
@@ -202,10 +270,10 @@ class ConnectedLineSensor(AsteriskDeviceEntity, SensorEntity):
             "Exten": event["Exten"],
             "Context": event["Context"],
         }
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
-    def state(self) -> str:
+    def native_value(self) -> str:
         """Return registered state."""
         return self._state
 
@@ -241,7 +309,7 @@ class DTMFSentSensor(AsteriskDeviceEntity, SensorEntity):
             Direction="Sent",
         )
 
-    def handle_dtmf(self, event: Event, **kwargs):
+    def handle_dtmf(self, event: AMIEvent):
         """Handle an DTMF event."""
         self._state = now()
         self._extra_attributes = {
@@ -253,10 +321,10 @@ class DTMFSentSensor(AsteriskDeviceEntity, SensorEntity):
             "ConnectedLineName": event["ConnectedLineName"],
             "Context": event["Context"],
         }
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
-    def state(self) -> str:
+    def native_value(self) -> str:
         """Return registered state."""
         return self._state
 
@@ -287,7 +355,7 @@ class DTMFReceivedSensor(AsteriskDeviceEntity, SensorEntity):
             Direction="Received",
         )
 
-    def handle_dtmf(self, event: Event, **kwargs):
+    def handle_dtmf(self, event: AMIEvent):
         """Handle an DTMF event."""
         self._state = now()
         self._extra_attributes = {
@@ -297,10 +365,10 @@ class DTMFReceivedSensor(AsteriskDeviceEntity, SensorEntity):
             "ConnectedLineName": event["ConnectedLineName"],
             "Context": event["Context"],
         }
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
-    def state(self) -> str:
+    def native_value(self) -> str:
         """Return registered state."""
         return self._state
 

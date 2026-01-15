@@ -1,12 +1,12 @@
 import logging
 
-from asterisk.ami import AMIClient, AutoReconnect, Event, SimpleAction
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.const import CONF_DEVICES
 
+from .ami_client import SimpleAMIClient, AMIEvent
 from .base import AsteriskDeviceEntity
 from .const import AUTO_RECONNECT, CLIENT, DOMAIN
 
@@ -36,17 +36,20 @@ class RegisteredSensor(AsteriskDeviceEntity, BinarySensorEntity):
         self._state = (
             device["status"] != "Unavailable" and device["status"] != "Unknown"
         )
+        self._device_filter = f"{device['tech']}/{device['extension']}"
         self._ami_client.add_event_listener(
             self.handle_state_change,
             white_list=["DeviceStateChange"],
-            Device=f"{device['tech']}/{device['extension']}",
         )
 
-    def handle_state_change(self, event: Event, **kwargs):
+    def handle_state_change(self, event: AMIEvent):
         """Handle an device state change event."""
-        state = event["State"]
+        device = event.get("Device", "")
+        if device != self._device_filter:
+            return
+        state = event.get("State", "")
         self._state = state != "UNAVAILABLE" and state != "UNKNOWN"
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
     def is_on(self) -> bool:
@@ -64,29 +67,39 @@ class AMIConnected(BinarySensorEntity):
 
     def __init__(self, hass, entry):
         """Initialize the sensor."""
+        self._hass = hass  # Store hass reference for non-blocking callbacks
         self._entry = entry
         self._unique_id = f"{self._entry.entry_id}_connected"
         self._name = "AMI Connected"
-        self._state: bool = True
-        self._ami_client: AMIClient = hass.data[DOMAIN][entry.entry_id][CLIENT]
-        self._auto_reconnect: AutoReconnect = hass.data[DOMAIN][entry.entry_id][
-            AUTO_RECONNECT
-        ]
-        self._auto_reconnect.on_disconnect = self.on_disconnect
-        self._auto_reconnect.on_reconnect = self.on_reconnect
-        f = self._ami_client.send_action(SimpleAction("CoreSettings"))
-        self._asterisk_version = f.response.keys["AsteriskVersion"]
+        self._ami_client: SimpleAMIClient = hass.data[DOMAIN][entry.entry_id][CLIENT]
+        self._state: bool = self._ami_client.connected
+
+        # Set up disconnect/reconnect callbacks
+        self._ami_client.set_on_disconnect(self.on_disconnect)
+        self._ami_client.set_on_reconnect(self.on_reconnect)
+
+        # Get Asterisk version
+        response = self._ami_client.send_action("CoreSettings")
+        self._asterisk_version = "Unknown"
+        if response:
+            for line in response.split("\r\n"):
+                if line.startswith("AsteriskVersion:"):
+                    self._asterisk_version = line.split(": ", 1)[1]
+                    break
+
+    def _schedule_update(self):
+        """Schedule a state update in Home Assistant's event loop (thread-safe)."""
+        self._hass.loop.call_soon_threadsafe(self.schedule_update_ha_state)
 
     def on_disconnect(self, client, response):
-        _LOGGER.debug(f"Disconnected from AMI: {response}")
-        client.disconnect()
+        _LOGGER.debug("Disconnected from AMI: %s", response)
         self._state = False
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     def on_reconnect(self, client, response):
-        _LOGGER.debug(f"Reconnected to AMI: {response}")
+        _LOGGER.debug("Reconnected to AMI: %s", response)
         self._state = True
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Non-blocking: queue to HA event loop
 
     @property
     def device_info(self):

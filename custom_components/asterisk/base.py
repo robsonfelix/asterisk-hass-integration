@@ -1,5 +1,4 @@
-from asterisk.ami import AMIClient
-
+from .ami_client import SimpleAMIClient
 from .const import CLIENT, CONF_DEBUG_LOGGING, DOMAIN
 
 
@@ -8,12 +7,17 @@ class AsteriskDeviceEntity:
 
     def __init__(self, hass, entry, device):
         """Initialize the sensor."""
+        self._hass = hass  # Store hass reference for non-blocking callbacks
         self._device = device
         self._entry = entry
         self._unique_id_prefix = f"{entry.entry_id}_{device['extension']}"
-        self._ami_client: AMIClient = hass.data[DOMAIN][entry.entry_id][CLIENT]
+        self._ami_client: SimpleAMIClient = hass.data[DOMAIN][entry.entry_id][CLIENT]
         self._name: str
         self._unique_id: str
+
+    def _schedule_update(self):
+        """Schedule a state update in Home Assistant's event loop (thread-safe)."""
+        self._hass.loop.call_soon_threadsafe(self.schedule_update_ha_state)
 
     @property
     def _debug_logging(self) -> bool:

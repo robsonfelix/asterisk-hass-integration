@@ -1,7 +1,6 @@
 import asyncio
 import logging
 
-from asterisk.ami import AMIClient, AutoReconnect, Event, SimpleAction
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_DEVICES,
@@ -13,6 +12,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
+from .ami_client import SimpleAMIClient, AMIEvent
 from .const import AUTO_RECONNECT, CLIENT, DOMAIN, PLATFORMS, SIP_LOADED, PJSIP_LOADED
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Setup up a config entry."""
-    _LOGGER.info("Setting up Asterisk integration for %s", entry.data.get(CONF_HOST))
+    _LOGGER.warning("Setting up Asterisk integration for %s", entry.data.get(CONF_HOST))
 
-    def create_PJSIP_device(event: Event, **kwargs):
+    def create_PJSIP_device(event: AMIEvent):
         _LOGGER.debug("Creating PJSIP device: %s", event)
         device = {
             "extension": event["ObjectName"],
@@ -36,7 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         hass.data[DOMAIN][entry.entry_id][CONF_DEVICES].append(device)
 
-    def create_SIP_device(event: Event, **kwargs):
+    def create_SIP_device(event: AMIEvent):
         _LOGGER.debug("Creating SIP device: %s", event)
         device = {
             "extension": event["ObjectName"],
@@ -45,7 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         hass.data[DOMAIN][entry.entry_id][CONF_DEVICES].append(device)
 
-    def devices_complete(event: Event, **kwargs):
+    def devices_complete(event: AMIEvent):
         sip_loaded = hass.data[DOMAIN][entry.entry_id][SIP_LOADED]
         pjsip_loaded = hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED]
         if event.name == "PeerlistComplete":
@@ -56,7 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("PJSIP loaded.")
             pjsip_loaded = True
             hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
-        
+
         if sip_loaded and pjsip_loaded:
             _LOGGER.debug("Both SIP and PJSIP loaded. Loading platforms.")
             asyncio.run_coroutine_threadsafe(
@@ -65,63 +65,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
     async def send_action_service(call) -> None:
-        "Send action service."
-
-        action = SimpleAction(call.data.get("action"), **call.data.get("parameters"))
-        _LOGGER.debug("Sending action: %s", action)
+        """Send action service."""
+        action = call.data.get("action")
+        params = call.data.get("parameters", {})
+        _LOGGER.debug("Sending action: %s with params %s", action, params)
 
         try:
-            f = hass.data[DOMAIN][entry.entry_id][CLIENT].send_action(action)
-            _LOGGER.debug("Action response: %s", f.response)
-        except BrokenPipeError:
-            _LOGGER.warning("Failed to send action: AMI Disconnected")
+            response = hass.data[DOMAIN][entry.entry_id][CLIENT].send_action(action, **params)
+            _LOGGER.debug("Action response: %s", response)
+        except Exception as e:
+            _LOGGER.warning("Failed to send action: %s", e)
 
-    client = AMIClient(
-        address=entry.data[CONF_HOST],
+    # Create our simple AMI client
+    client = SimpleAMIClient(
+        host=entry.data[CONF_HOST],
         port=entry.data[CONF_PORT],
-        timeout=10,
+        username=entry.data[CONF_USERNAME],
+        secret=entry.data[CONF_PASSWORD],
     )
-    auto_reconnect = AutoReconnect(client, delay=3)
+
+    # Connect to AMI
     try:
-        future = client.login(
-            username=entry.data[CONF_USERNAME],
-            secret=entry.data[CONF_PASSWORD],
-        )
-        _LOGGER.debug("Login response: %s", future.response)
-        if future.response.is_error():
-            raise ConfigEntryAuthFailed(future.response.keys["Message"])
-    except ConfigEntryAuthFailed:
-        raise
+        if not client.connect():
+            raise ConfigEntryNotReady("Failed to connect to AMI")
     except Exception as e:
         raise ConfigEntryNotReady(e)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         CLIENT: client,
-        AUTO_RECONNECT: auto_reconnect,
+        AUTO_RECONNECT: None,  # Our client handles reconnection internally
         CONF_DEVICES: [],
         SIP_LOADED: False,
         PJSIP_LOADED: False,
     }
     hass.services.async_register(DOMAIN, "send_action", send_action_service)
 
+    # Register event listeners for SIP devices
     client.add_event_listener(create_SIP_device, white_list=["PeerEntry"])
     client.add_event_listener(devices_complete, white_list=["PeerlistComplete"])
-    f = client.send_action(SimpleAction("SIPpeers"))
-    if f.response.is_error():
+    response = client.send_action("SIPpeers")
+    if "Error" in response:
         _LOGGER.debug("SIP module not loaded. Skipping SIP devices.")
         hass.data[DOMAIN][entry.entry_id][SIP_LOADED] = True
 
+    # Register event listeners for PJSIP devices
     client.add_event_listener(create_PJSIP_device, white_list=["EndpointList"])
     client.add_event_listener(devices_complete, white_list=["EndpointListComplete"])
-    f = client.send_action(SimpleAction("PJSIPShowEndpoints"))
-    if f.response.is_error():
-       _LOGGER.debug("PJSIP module not loaded. Skipping PJSIP devices.")
-       hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
+    response = client.send_action("PJSIPShowEndpoints")
+    if "Error" in response:
+        _LOGGER.debug("PJSIP module not loaded. Skipping PJSIP devices.")
+        hass.data[DOMAIN][entry.entry_id][PJSIP_LOADED] = True
 
     # Listen for options updates to reload the integration
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
-    _LOGGER.info("Asterisk integration setup complete")
+    _LOGGER.warning("Asterisk integration setup complete")
     return True
 
 
@@ -130,7 +128,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = hass.data[DOMAIN][entry.entry_id]
     client = data[CLIENT]
 
-    client.logoff()
     client.disconnect()
 
     unloaded = all(
