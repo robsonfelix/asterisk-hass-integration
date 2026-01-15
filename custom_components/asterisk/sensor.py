@@ -76,7 +76,7 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
 
         _LOGGER.warning("ASTERISK: %s -> %s", device, state)
         self._state = STATES.get(state, STATES["UNKNOWN"])
-        self.schedule_update_ha_state()
+        self._schedule_update()  # Thread-safe: queue to HA event loop
 
     def handle_newstate(self, event: AMIEvent):
         """Handle a Newstate event to detect ringing at channel level."""
