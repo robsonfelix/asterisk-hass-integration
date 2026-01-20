@@ -1,12 +1,12 @@
 import logging
 
-from asterisk.ami import AMIClient
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
 import voluptuous as vol
 
+from .ami_client import SimpleAMIClient
 from .const import CONF_DEBUG_LOGGING, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,16 +42,15 @@ class AsteriskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _test_ami(self, host, port, username, password):
         """Tests the AMI connection."""
         errors = {}
-        client = AMIClient(address=host, port=port)
+        client = SimpleAMIClient(
+            host=host,
+            port=port,
+            username=username,
+            secret=password,
+        )
         try:
-            future = client.login(username=username, secret=password)
-            if future.response.is_error():
-                _LOGGER.debug(
-                    "Failed to connect to AMI: %s", future.response.keys["Message"]
-                )
+            if not client.connect():
                 errors["base"] = "invalid_auth"
-
-            client.logoff()
             client.disconnect()
         except Exception as e:
             _LOGGER.debug("Failed to connect to AMI: %s", e)
