@@ -64,6 +64,11 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
             self.handle_event,
             white_list=["DeviceStateChange"],
         )
+        # Also listen to DeviceStateListItem for state refresh after reconnection
+        self._ami_client.add_event_listener(
+            self.handle_state_list_item,
+            white_list=["DeviceStateListItem"],
+        )
 
     def handle_event(self, event: AMIEvent):
         """Handle an endpoint update event."""
@@ -75,6 +80,19 @@ class DeviceStateSensor(AsteriskDeviceEntity, SensorEntity):
             return
 
         _LOGGER.warning("ASTERISK: %s -> %s", device, state)
+        self._state = STATES.get(state, STATES["UNKNOWN"])
+        self._schedule_update()  # Thread-safe: queue to HA event loop
+
+    def handle_state_list_item(self, event: AMIEvent):
+        """Handle DeviceStateListItem event for state refresh after reconnection."""
+        device = event.get("Device", "")
+        state = event.get("State", "")
+
+        # Only process events for our device
+        if device != self._device_filter:
+            return
+
+        _LOGGER.debug("DeviceStateListItem: %s -> %s", device, state)
         self._state = STATES.get(state, STATES["UNKNOWN"])
         self._schedule_update()  # Thread-safe: queue to HA event loop
 

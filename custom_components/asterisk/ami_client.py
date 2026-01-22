@@ -37,11 +37,14 @@ class SimpleAMIClient:
         self._connected = False
         self._running = False
         self._reader_thread: Optional[threading.Thread] = None
+        self._ping_thread: Optional[threading.Thread] = None
         self._event_listeners: List[tuple] = []  # (callback, whitelist, filters)
         self._on_disconnect: Optional[Callable] = None
         self._on_reconnect: Optional[Callable] = None
         self._reconnect_delay = 5
+        self._ping_interval = 30  # Send ping every 30 seconds
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()  # Separate lock for send operations
 
     def connect(self) -> bool:
         """Connect and login to AMI."""
@@ -64,6 +67,7 @@ class SimpleAMIClient:
                 self._connected = True
                 self._running = True
                 self._start_reader()
+                self._start_ping()
                 _LOGGER.info("Connected to AMI at %s:%s", self.host, self.port)
                 return True
             else:
@@ -87,6 +91,43 @@ class SimpleAMIClient:
         """Start the event reader thread."""
         self._reader_thread = threading.Thread(target=self._read_events, daemon=True)
         self._reader_thread.start()
+
+    def _start_ping(self):
+        """Start the ping thread for keep-alive."""
+        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        self._ping_thread.start()
+
+    def _ping_loop(self):
+        """Send periodic pings to keep connection alive and detect failures."""
+        while self._running and self._connected:
+            time.sleep(self._ping_interval)
+            if not self._running or not self._connected:
+                break
+            try:
+                # Send a Ping action - this is a lightweight AMI command
+                response = self.ping()
+                if not response:
+                    _LOGGER.warning("AMI ping failed - no response")
+                    self._handle_disconnect()
+                    break
+            except Exception as e:
+                _LOGGER.warning("AMI ping error: %s", e)
+                self._handle_disconnect()
+                break
+
+    def ping(self) -> bool:
+        """Send a ping to AMI and return True if successful."""
+        if not self._connected or not self._sock:
+            return False
+        try:
+            with self._send_lock:
+                cmd = "Action: Ping\r\n\r\n"
+                self._sock.send(cmd.encode())
+            # Response will be received by reader thread, just check we could send
+            return True
+        except Exception as e:
+            _LOGGER.debug("Ping send failed: %s", e)
+            return False
 
     def _read_events(self):
         """Read events from AMI socket."""
@@ -201,8 +242,9 @@ class SimpleAMIClient:
         cmd += "\r\n"
 
         try:
-            self._sock.send(cmd.encode())
-            return self._recv_response()
+            with self._send_lock:
+                self._sock.send(cmd.encode())
+                return self._recv_response()
         except Exception as e:
             _LOGGER.error("Failed to send action: %s", e)
             return ""

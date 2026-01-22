@@ -17,6 +17,9 @@ from .const import AUTO_RECONNECT, CLIENT, DOMAIN, PLATFORMS, SIP_LOADED, PJSIP_
 
 _LOGGER = logging.getLogger(__name__)
 
+# Key for storing state refresh callbacks
+STATE_REFRESH_CALLBACKS = "state_refresh_callbacks"
+
 # Timeout for device discovery (seconds)
 DISCOVERY_TIMEOUT = 10
 
@@ -126,7 +129,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICES: devices,
         SIP_LOADED: True,
         PJSIP_LOADED: True,
+        STATE_REFRESH_CALLBACKS: [],  # List of callbacks to refresh sensor states
     }
+
+    def on_reconnect(ami_client, message):
+        """Handle AMI reconnection - refresh all device states."""
+        _LOGGER.warning("AMI reconnected - refreshing device states")
+
+        # Query device states - DeviceStateList triggers DeviceStateChange events
+        # for each device, which sensors are already listening for
+        response = ami_client.send_action("DeviceStateList")
+        _LOGGER.debug("DeviceStateList response: %s", response)
+
+        # Call any registered refresh callbacks
+        callbacks = hass.data[DOMAIN][entry.entry_id].get(STATE_REFRESH_CALLBACKS, [])
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as e:
+                _LOGGER.error("Error in state refresh callback: %s", e)
+
+    client.set_on_reconnect(on_reconnect)
+
+    def on_disconnect(ami_client, error):
+        """Handle AMI disconnection."""
+        _LOGGER.warning("AMI connection lost - will attempt to reconnect")
+
+    client.set_on_disconnect(on_disconnect)
 
     # Register service
     hass.services.async_register(DOMAIN, "send_action", send_action_service)
