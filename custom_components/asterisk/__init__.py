@@ -11,6 +11,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 
 from .ami_client import SimpleAMIClient, AMIEvent
 from .const import AUTO_RECONNECT, CLIENT, DOMAIN, PLATFORMS, SIP_LOADED, PJSIP_LOADED
@@ -122,10 +123,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("Device discovery timed out after %ds. Found %d devices.",
                        DISCOVERY_TIMEOUT, len(devices))
 
-    # Note: We intentionally do NOT clean up stale devices here.
-    # Discovery only returns currently registered devices, not all configured extensions.
-    # Offline phones would be incorrectly removed as "stale" if we cleaned up here.
-    # Users should manually delete orphaned devices via the HA UI if needed.
+    # Small delay to ensure all events are processed by callbacks
+    await asyncio.sleep(0.5)
+
+    _LOGGER.warning(
+        "Discovery found %d devices: %s",
+        len(devices),
+        [d['extension'] for d in devices],
+    )
+
+    # Clean up stale devices that no longer exist in Asterisk
+    # PJSIPShowEndpoints returns ALL configured endpoints (not just registered ones)
+    # so it's safe to remove devices not in this list
+    if len(devices) >= 5:  # Safety check - expect at least 5 devices
+        device_registry = dr.async_get(hass)
+        current_device_ids = {
+            (DOMAIN, f"{entry.entry_id}_{device['extension']}")
+            for device in devices
+        }
+        # Also include the server device
+        current_device_ids.add((DOMAIN, f"{entry.entry_id}_server"))
+
+        # Find and remove stale devices
+        for device_entry in dr.async_entries_for_config_entry(device_registry, entry.entry_id):
+            # Check if any of the device's identifiers are in our current set
+            if not any(identifier in current_device_ids for identifier in device_entry.identifiers):
+                _LOGGER.warning(
+                    "Removing stale device: %s (identifiers: %s)",
+                    device_entry.name,
+                    device_entry.identifiers,
+                )
+                device_registry.async_remove_device(device_entry.id)
+    else:
+        _LOGGER.warning(
+            "Skipping stale device cleanup - only found %d devices (expected at least 5, possible discovery issue)",
+            len(devices),
+        )
 
     # Store data
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
